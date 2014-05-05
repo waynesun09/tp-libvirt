@@ -2,6 +2,7 @@ import logging
 from autotest.client.shared import error
 from virttest import virsh, libvirt_xml
 from virttest.libvirt_xml import vm_xml, xcepts
+from provider import libvirt_version
 
 
 def run(test, params, env):
@@ -44,6 +45,22 @@ def run(test, params, env):
     suspend_target = params.get("pm_suspend_target", "mem")
     status_error = "yes" == params.get("status_error", "yes")
     virsh_dargs = {'debug': True}
+
+    # Libvirt acl test related params
+    uri = params.get("virsh_uri")
+    unprivileged_user = params.get('unprivileged_user')
+    if unprivileged_user:
+        if unprivileged_user.count('EXAMPLE'):
+            unprivileged_user = 'testacl'
+
+    if not libvirt_version.version_compare(1, 1, 1):
+        if params.get('setup_libvirt_polkit') == 'yes':
+            raise error.TestNAError("API acl test not supported in current"
+                                    + " libvirt version.")
+
+    if params.get('setup_libvirt_polkit') == 'yes':
+        virsh_dargs = {'debug': True, 'uri': uri,
+                       'unprivileged_user': unprivileged_user}
 
     # A backup of original vm
     vmxml_backup = vm_xml.VMXML.new_from_inactive_dumpxml(vm_name)

@@ -37,10 +37,13 @@ def run(test, params, env):
     with_pool_vol = 'yes' == params.get("with_pool_vol", "no")
     check_cap_rawio = "yes" == params.get("check_cap_rawio", "no")
     virt_use_nfs = params.get("virt_use_nfs", "off")
+    virt_use_fusefs = params.get("virt_use_fusefs", "off")
     pool_name = params.get("pool_name")
     pool_type = params.get("pool_type")
     pool_target = params.get("pool_target")
     emulated_image = params.get("emulated_image")
+    source_name = params.get("source_name")
+    source_path = params.get("source_path")
     vol_name = params.get("vol_name")
     vol_format = params.get("vol_format")
     # Get variables about VM and get a VM object and VMXML instance.
@@ -86,7 +89,9 @@ def run(test, params, env):
             logging.debug("pool_type %s" % pool_type)
             pvt.pre_pool(pool_name, pool_type, pool_target,
                          emulated_image, image_size="1G",
-                         pre_disk_vol=["20M"])
+                         pre_disk_vol=["20M"],
+                         source_name=source_name,
+                         source_path=source_path)
 
             if pool_type in ["iscsi", "disk"]:
                 # iscsi and disk pool did not support create volume in libvirt,
@@ -98,10 +103,21 @@ def run(test, params, env):
                     vol_name = vols[0]
                 else:
                     raise error.TestNAError("No volume in pool: %s" % pool_name)
+
+            elif pool_type == "gluster":
+
+                # vol-create gluster pool volume not supported yet.
+                # direct command create then pool connect will be broken.
+                # case https://tcms.engineering.redhat.com/case/392512/ use
+                # direct mount other than pool, need reconsider this, maybe
+                # direct use gluster module and mount.
+
             else:
                 vol_arg = {'name': vol_name, 'format': vol_format,
                            'capacity': 1073741824,
                            'allocation': 1048576, }
+                if pool_type == "gluster":
+                    vol_arg['vol_type'] = "network"
                 # Set volume xml file
                 volxml = libvirt_xml.VolXML()
                 newvol = volxml.new_vol(**vol_arg)
@@ -128,9 +144,15 @@ def run(test, params, env):
             # set host_sestatus as nfs pool will reset it
             utils_selinux.set_status(host_sestatus)
             # set virt_use_nfs
-            result = utils.run("setsebool virt_use_nfs %s" % virt_use_nfs)
-            if result.exit_status:
-                raise error.TestNAError("Failed to set virt_use_nfs value")
+            if params.get("virt_use_nfs"):
+                result = utils.run("setsebool virt_use_nfs %s" % virt_use_nfs)
+                if result.exit_status:
+                    raise error.TestNAError("Failed to set virt_use_nfs value")
+            # set virt_use_fusefs
+            if params.get("virt_use_fusefs"):
+                result = utils.run("setsebool virt_use_fusefs %s" % virt_use_nfs)
+                if result.exit_status:
+                    raise error.TestNAError("Failed to set virt_use_fusefs value")
         else:
             # Init a QemuImg instance.
             params['image_name'] = img_name
@@ -204,7 +226,7 @@ def run(test, params, env):
         if pvt:
             try:
                 pvt.cleanup_pool(pool_name, pool_type, pool_target,
-                                 emulated_image)
+                                 emulated_image, source_name)
             except error.TestFail, detail:
                 logging.error(str(detail))
         backup_xml.sync()

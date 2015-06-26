@@ -79,14 +79,14 @@ def run(test, params, env):
                 disk_xml.driver = driver_attr
 
                 new_attrs = disk_xml.source.attrs
-                if disk_xml.source.attrs.has_key('file'):
+                if 'file' in new_attrs::
                     file_name = disk_xml.source.attrs['file']
                     new_file = "%s.snap%s" % (file_name.split('.')[0],
                                               count)
                     snapshot_external_disks.append(new_file)
                     new_attrs.update({'file': new_file})
                     hosts = None
-                elif (disk_xml.source.attrs.has_key('name') and
+                elif ('name' in new_attrs and
                       disk_src_protocol == 'gluster'):
                     src_name = disk_xml.source.attrs['name']
                     new_name = "%s.snap%s" % (src_name.split('.')[0],
@@ -94,8 +94,8 @@ def run(test, params, env):
                     new_attrs.update({'name': new_name})
                     snapshot_external_disks.append(new_name)
                     hosts = disk_xml.source.hosts
-                elif (disk_xml.source.attrs.has_key('dev') or
-                      disk_xml.source.attrs.has_key('name')):
+                elif ('dev' in new_attrs or
+                      'name' in new_attrs):
                     if (disk_xml.type_name == 'block' or
                             disk_src_protocol == 'iscsi'):
                         # Use local file as external snapshot target for block
@@ -301,7 +301,7 @@ def run(test, params, env):
                     ret = check_chain_xml(disk_xml, chain_lst)
                     if not ret:
                         raise error.TestFail(err_msg)
-                elif "base" or "shallow" in base_option:
+                elif "base" in base_option or "shallow" in base_option:
                     chain_lst = snap_src_lst[::-1]
                     if not base_index and base_image:
                         base_index = chain_lst.index(base_image)

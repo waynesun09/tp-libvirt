@@ -1,11 +1,12 @@
 import os
 import logging
 import tempfile
-from autotest.client.shared import error
+from autotest.client.shared import utils, error
 from virttest import virsh, data_dir
 from virttest import aexpect
 from virttest import utils_libvirtd
 from virttest.libvirt_xml import vm_xml
+from virttest.libvirt_xml import snapshot_xml
 from virttest.utils_test import libvirt
 from provider import libvirt_version
 
@@ -17,15 +18,23 @@ def check_chain_xml(disk_xml, chain_lst):
     return: True or False
     """
     logging.debug("expected backing chain list is %s", chain_lst)
-    src_file = disk_xml.find('source').get('file')
+    elem_list = ['file', 'name', 'dev']
+    src_file = None
+    src_element = disk_xml.find('source')
+    for elem in elem_list:
+        elem_val = src_element.get(elem)
+        if elem_val:
+            src_file = elem_val
+            break
     if src_file != chain_lst[0]:
         logging.error("Current top img %s is not expected", src_file)
         return False
+
     for i in range(1, len(chain_lst)):
         backing_xml = disk_xml.find('backingStore')
         src_element = backing_xml.find('source')
         src_file = None
-        for elem in ('file', 'name', 'dev'):
+        for elem in elem_list:
             elem_val = src_element.get(elem)
             if elem_val:
                 src_file = elem_val
@@ -51,37 +60,94 @@ def run(test, params, env):
     """
 
     def make_disk_snapshot(postfix_n):
-        # Add all disks into commandline.
-        disks = vm.get_disk_devices()
-
-        # Make three external snapshots for disks only
+        '''
+        Make disk snapshot
+        '''
         for count in range(1, 4):
-            options = "%s_%s %s%s-desc " % (postfix_n, count,
-                                            postfix_n, count)
-            options += "--disk-only --atomic --no-metadata"
+            snap_xml = snapshot_xml.SnapshotXML()
+            snapshot_name = "snapshot_test%s" % count
+            snap_xml.snap_name = snapshot_name
+            snap_xml.description = "Snapshot Test %s" % count
+
+            # Add all disks into xml file.
+            vmxml = vm_xml.VMXML.new_from_inactive_dumpxml(vm_name)
+            disks = vmxml.devices.by_device_tag('disk')
+            new_disks = []
+            # Use first disk to format snapshot xml
+            src_disk_xml = disks[0]
+            disk_xml = snap_xml.SnapDiskXML()
+            disk_xml.xmltreefile = src_disk_xml.xmltreefile
+            del disk_xml.device
+            del disk_xml.address
+            disk_xml.snapshot = "external"
+            disk_xml.disk_name = disk_xml.target['dev']
+
+            # Only qcow2 works as external snapshot file format, update it
+            # here
+            driver_attr = disk_xml.driver
+            driver_attr.update({'type': 'qcow2'})
+            disk_xml.driver = driver_attr
+
+            new_attrs = disk_xml.source.attrs
+            if 'file' in new_attrs:
+                file_name = disk_xml.source.attrs['file']
+                new_file = "%s.snap%s" % (file_name.split('.')[0],
+                                          count)
+                snapshot_external_disks.append(new_file)
+                new_attrs.update({'file': new_file})
+                hosts = None
+            elif ('name' in new_attrs and
+                  disk_src_protocol == 'gluster'):
+                src_name = disk_xml.source.attrs['name']
+                new_name = "%s.snap%s" % (src_name.split('.')[0],
+                                          count)
+                new_attrs.update({'name': new_name})
+                snapshot_external_disks.append(new_name)
+                hosts = disk_xml.source.hosts
+            elif ('dev' in new_attrs or
+                  'name' in new_attrs or
+                  'pool' in new_attrs):
+                if (disk_xml.type_name == 'block' or
+                        disk_source_protocol == 'iscsi'):
+                    disk_xml.type_name = 'block'
+                    if 'name' in new_attrs:
+                        del new_attrs['name']
+                        del new_attrs['protocol']
+                    elif 'pool' in new_attrs:
+                        del new_attrs['pool']
+                        del new_attrs['volume']
+                        del new_attrs['mode']
+                    back_n = "backing-file%s" % count
+                    back_path = libvirt.setup_or_cleanup_iscsi(is_setup=True,
+                                                               is_login=True,
+                                                               image_size="1G",
+                                                               emulated_image=back_n)
+                    snapshot_external_disks.append(back_path)
+                    backing_file.append(back_n)
+                    cmd = "qemu-img create -f qcow2 %s 1G" % back_path
+                    utils.system(cmd)
+                    new_attrs.update({'dev': back_path})
+                    hosts = None
+
+            new_src_dict = {"attrs": new_attrs}
+            if hosts:
+                new_src_dict.update({"hosts": hosts})
+            disk_xml.source = disk_xml.new_disk_source(**new_src_dict)
+
+            new_disks.append(disk_xml)
+
+            snap_xml.set_disks(new_disks)
+            snapshot_xml_path = snap_xml.xml
+            logging.debug("The snapshot xml is: %s" % snap_xml.xmltreefile)
+
+            options = "--disk-only --xmlfile %s " % snapshot_xml_path
             if needs_agent:
                 options += " --quiesce"
+            snapshot_result = virsh.snapshot_create(
+                vm_name, options, debug=True)
 
-            for disk in disks:
-                disk_detail = disks[disk]
-                basename = os.path.basename(disk_detail['source'])
-
-                # Remove the original suffix if any, appending
-                # ".postfix_n[0-9]"
-                diskname = basename.split(".")[0]
-                snap_name = "%s.%s%s" % (diskname, postfix_n, count)
-                disk_external = os.path.join(tmp_dir, snap_name)
-
-                snapshot_external_disks.append(disk_external)
-                options += " %s,snapshot=external,file=%s" % (disk,
-                                                              disk_external)
-
-            cmd_result = virsh.snapshot_create_as(vm_name, options,
-                                                  ignore_status=True,
-                                                  debug=True)
-            status = cmd_result.exit_status
-            if status != 0:
-                raise error.TestFail("Failed to make snapshots for disks!")
+            if snapshot_result.exit_status != 0:
+                raise error.TestFail(snapshot_result.stderr)
 
             # Create a file flag in VM after each snapshot
             flag_file = tempfile.NamedTemporaryFile(prefix=("snapshot_test_"),
@@ -94,8 +160,17 @@ def run(test, params, env):
                 raise error.TestFail("Touch file in vm failed. %s" % output)
             snapshot_flag_files.append(file_path)
 
-    # MAIN TEST CODE ###
-    # Process cartesian parameters
+            # Create a file flag in VM after each snapshot
+            flag_file = tempfile.NamedTemporaryFile(prefix=("snapshot_test_"),
+                                                    dir="/tmp")
+            file_path = flag_file.name
+            flag_file.close()
+
+            status, output = session.cmd_status_output("touch %s" % file_path)
+            if status:
+                raise error.TestFail("Touch file in vm failed. %s" % output)
+            snapshot_flag_files.append(file_path)
+
     vm_name = params.get("main_vm")
     vm = env.get_vm(vm_name)
     vm_state = params.get("vm_state", "running")
@@ -121,6 +196,7 @@ def run(test, params, env):
     tmp_dir = data_dir.get_tmp_dir()
     pool_name = params.get("pool_name", "gluster-pool")
     brick_path = os.path.join(tmp_dir, pool_name)
+    emu_image = params.get("emulated_image", "blockcommit-iscsi")
 
     if not top_inactive:
         if not libvirt_version.version_compare(1, 2, 4):
@@ -157,6 +233,7 @@ def run(test, params, env):
         blk_source = first_disk['source']
         blk_target = first_disk['target']
         snapshot_flag_files = []
+        backing_file = []
 
         # get a vm session before snapshot
         session = vm.wait_for_login()
@@ -203,23 +280,17 @@ def run(test, params, env):
 
         # check snapshot disk xml backingStore is expected
         vmxml = vm_xml.VMXML.new_from_dumpxml(vm_name)
-        disks = vmxml.devices.by_device_tag('disk')
-        disk_xml = None
-        for disk in disks:
-            if disk.target['dev'] != blk_target:
-                continue
-            else:
-                disk_xml = disk.xmltreefile
-                logging.debug("the target disk xml after snapshot is %s",
-                              disk_xml)
-                break
+        disk = vmxml.devices.by_device_tag('disk')[0]
+        disk_xml = disk.xmltreefile
+        logging.debug("the target disk xml after snapshot is %s",
+                      disk_xml)
 
+        chain_lst = snap_src_lst[::-1]
         if not disk_xml:
             raise error.TestFail("Can't find disk xml with target %s" %
                                  blk_target)
         elif libvirt_version.version_compare(1, 2, 4):
             # backingStore element introuduced in 1.2.4
-            chain_lst = snap_src_lst[::-1]
             ret = check_chain_xml(disk_xml, chain_lst)
             if not ret:
                 raise error.TestFail("Domain image backing chain check failed")
@@ -235,14 +306,13 @@ def run(test, params, env):
             blockcommit_options += " --shallow"
         elif base_option == "base":
             if middle_base:
-                snap_name = "%s.%s1" % (diskname, postfix_n)
-                blk_source = os.path.join(tmp_dir, snap_name)
+                blk_source = chain_lst[2]
             blockcommit_options += " --base %s" % blk_source
 
         if top_inactive:
-            snap_name = "%s.%s2" % (diskname, postfix_n)
-            top_image = os.path.join(tmp_dir, snap_name)
+            top_image = "%s[1]" % blk_target
             blockcommit_options += " --top %s" % top_image
+            top_image = chain_lst[1]
         else:
             blockcommit_options += " --active"
             if pivot_opt:
@@ -398,12 +468,13 @@ def run(test, params, env):
         vmxml_backup.sync("--snapshots-metadata")
         if cmd_session:
             cmd_session.close()
-        for disk in snapshot_external_disks:
-            if os.path.exists(disk):
-                os.remove(disk)
 
         if disk_src_protocol == 'iscsi':
+            for i in backing_file:
+                libvirt.setup_or_cleanup_iscsi(is_setup=False,
+                                               emulated_image=i)
             libvirt.setup_or_cleanup_iscsi(is_setup=False,
+                                           emulated_image=emu_image,
                                            restart_tgtd=restart_tgtd)
         elif disk_src_protocol == 'gluster':
             libvirt.setup_or_cleanup_gluster(False, vol_name, brick_path)
@@ -413,3 +484,7 @@ def run(test, params, env):
             restore_selinux = params.get('selinux_status_bak')
             libvirt.setup_or_cleanup_nfs(is_setup=False,
                                          restore_selinux=restore_selinux)
+
+        for disk in snapshot_external_disks:
+            if os.path.exists(disk):
+                os.remove(disk)
